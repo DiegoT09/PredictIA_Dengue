@@ -1,22 +1,27 @@
 import pickle
 import numpy as np
+import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from supabase import create_client, Client
 
-# Cargaremos el modelo RF creado
+# ── Cargar modelo ──
 with open("random_forest_dengue.pkl", "rb") as f:
     bundle = pickle.load(f)
 
-modelo      = bundle["modelo"]
-le_distrito = bundle["le_distrito"]
+modelo       = bundle["modelo"]
+le_distrito  = bundle["le_distrito"]
 le_provincia = bundle["le_provincia"]
-FEATURES    = bundle["features"]
-CLASES      = bundle["nombres_clases"]
+FEATURES     = bundle["features"]
+CLASES       = bundle["nombres_clases"]
 
+# ── Conexión Supabase ──
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-
+# ── App FastAPI ──
 app = FastAPI(
     title="API Predicción Dengue — Lima Metropolitana",
     version="1.0.0"
@@ -29,7 +34,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Schema de entrada ──
+# ── Schemas ──
 class InputPrediccion(BaseModel):
     distrito: str
     provincia: str = "LIMA"
@@ -74,6 +79,19 @@ class InputPrediccion(BaseModel):
     acumulado_4sem: float = 0.0
     indice_calor_humedad: float = 0.0
     tendencia_precip: float = 0.0
+    usuario_id: int = None
+    distrito_id: int = None
+
+class InputEscenario(BaseModel):
+    usuario_id: int
+    distrito_id: int
+    semana_epidemiologica: int
+    año: int
+    delta_temperatura: float = 0.0
+    delta_precipitacion: float = 0.0
+    delta_humedad: float = 0.0
+    casos_lag1: float = 0.0
+    base: InputPrediccion
 
 # ── Función auxiliar ──
 def construir_vector(data: InputPrediccion):
@@ -103,7 +121,7 @@ def construir_vector(data: InputPrediccion):
     ]
     return np.array(vector).reshape(1, -1)
 
-# Endpoints
+# ── Endpoints ──
 @app.get("/")
 def raiz():
     return {
@@ -119,10 +137,42 @@ def listar_distritos():
 @app.post("/predecir")
 def predecir(data: InputPrediccion):
     X = construir_vector(data)
-    codigo   = int(modelo.predict(X)[0])
-    probas   = modelo.predict_proba(X)[0]
-    nivel    = CLASES[codigo]
+    codigo    = int(modelo.predict(X)[0])
+    probas    = modelo.predict_proba(X)[0]
+    nivel     = CLASES[codigo]
     confianza = round(float(probas[codigo]) * 100, 2)
+
+    # Guardar predicción en Supabase
+    try:
+        prediccion_data = {
+            "distrito_id":          data.distrito_id,
+            "usuario_id":           data.usuario_id,
+            "semana_epidemiologica": data.semana_epidemiologica,
+            "año":                  2024,
+            "horizonte":            1,
+            "nivel_alerta":         nivel,
+            "nivel_alerta_codigo":  codigo,
+            "confianza_pct":        confianza,
+            "prob_bajo":            round(float(probas[0]) * 100, 2),
+            "prob_moderado":        round(float(probas[1]) * 100, 2),
+            "prob_alto":            round(float(probas[2]) * 100, 2),
+            "prob_critico":         round(float(probas[3]) * 100, 2),
+        }
+        result = supabase.table("predicciones").insert(prediccion_data).execute()
+        prediccion_id = result.data[0]["id"] if result.data else None
+
+        # Generar alerta automática si es Alto o Crítico
+        if codigo >= 2 and prediccion_id:
+            alerta_data = {
+                "prediccion_id": prediccion_id,
+                "nivel":         nivel,
+                "estado":        "activa",
+                "observaciones": f"Alerta generada automáticamente — {nivel} en semana {data.semana_epidemiologica}",
+            }
+            supabase.table("alertas").insert(alerta_data).execute()
+
+    except Exception as e:
+        print(f"Error guardando en Supabase: {e}")
 
     return {
         "distrito":            data.distrito,
@@ -147,7 +197,7 @@ def predecir_multi(data: InputPrediccion, casos_actuales: float = 0.0):
         "casos_lag3": data.casos_lag2,
         "casos_lag4": data.casos_lag3,
     })
-    X1 = construir_vector(sem1)
+    X1   = construir_vector(sem1)
     cod1 = int(modelo.predict(X1)[0])
     resultados["semana_1"] = {"nivel": CLASES[cod1], "codigo": cod1}
 
@@ -158,7 +208,7 @@ def predecir_multi(data: InputPrediccion, casos_actuales: float = 0.0):
         "casos_lag3": data.casos_lag1,
         "casos_lag4": data.casos_lag2,
     })
-    X2 = construir_vector(sem2)
+    X2   = construir_vector(sem2)
     cod2 = int(modelo.predict(X2)[0])
     resultados["semana_2"] = {"nivel": CLASES[cod2], "codigo": cod2}
 
@@ -169,12 +219,95 @@ def predecir_multi(data: InputPrediccion, casos_actuales: float = 0.0):
         "casos_lag3": casos_actuales,
         "casos_lag4": casos_actuales,
     })
-    X4 = construir_vector(sem4)
+    X4   = construir_vector(sem4)
     cod4 = int(modelo.predict(X4)[0])
     resultados["semana_4"] = {"nivel": CLASES[cod4], "codigo": cod4}
+
+    # Guardar los 3 horizontes en Supabase
+    try:
+        for horizonte, cod in [(1, cod1), (2, cod2), (4, cod4)]:
+            supabase.table("predicciones").insert({
+                "distrito_id":           data.distrito_id,
+                "usuario_id":            data.usuario_id,
+                "semana_epidemiologica":  data.semana_epidemiologica,
+                "año":                   2024,
+                "horizonte":             horizonte,
+                "nivel_alerta":          CLASES[cod],
+                "nivel_alerta_codigo":   cod,
+            }).execute()
+    except Exception as e:
+        print(f"Error guardando multi-horizonte: {e}")
 
     return {
         "distrito":    data.distrito,
         "semana_base": data.semana_epidemiologica,
         "horizontes":  resultados,
     }
+
+@app.post("/escenario")
+def simular_escenario(data: InputEscenario):
+    base = data.base
+
+    # Aplicar deltas climáticos
+    base_mod = base.model_copy(update={
+        "temp_media_c":           base.temp_media_c + data.delta_temperatura,
+        "temp_max_c":             base.temp_max_c + data.delta_temperatura,
+        "temp_min_c":             base.temp_min_c + data.delta_temperatura,
+        "precipitacion_total_mm": max(0, base.precipitacion_total_mm + data.delta_precipitacion),
+        "humedad_pct":            min(100, max(0, base.humedad_pct + data.delta_humedad)),
+    })
+
+    # Predecir 3 horizontes
+    resultados = {}
+    for semanas, key in [(1, "semana_1"), (2, "semana_2"), (4, "semana_4")]:
+        mod = base_mod.model_copy(update={
+            "semana_epidemiologica": min(base.semana_epidemiologica + semanas, 53)
+        })
+        X   = construir_vector(mod)
+        cod = int(modelo.predict(X)[0])
+        resultados[key] = {"nivel": CLASES[cod], "codigo": cod}
+
+    # Guardar escenario en Supabase
+    try:
+        supabase.table("escenarios").insert({
+            "usuario_id":            data.usuario_id,
+            "distrito_id":           data.distrito_id,
+            "semana_epidemiologica":  data.semana_epidemiologica,
+            "año":                   data.año,
+            "delta_temperatura":     data.delta_temperatura,
+            "delta_precipitacion":   data.delta_precipitacion,
+            "delta_humedad":         data.delta_humedad,
+            "casos_lag1":            data.casos_lag1,
+            "resultado_sem1":        resultados["semana_1"]["nivel"],
+            "resultado_sem2":        resultados["semana_2"]["nivel"],
+            "resultado_sem4":        resultados["semana_4"]["nivel"],
+        }).execute()
+    except Exception as e:
+        print(f"Error guardando escenario: {e}")
+
+    return {
+        "distrito_id":   data.distrito_id,
+        "semana_base":   data.semana_epidemiologica,
+        "deltas": {
+            "temperatura":   data.delta_temperatura,
+            "precipitacion": data.delta_precipitacion,
+            "humedad":       data.delta_humedad,
+        },
+        "horizontes": resultados,
+    }
+
+@app.get("/alertas")
+def listar_alertas():
+    try:
+        result = supabase.table("alertas").select("*").eq("estado", "activa").execute()
+        return {"alertas": result.data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/predicciones")
+def listar_predicciones():
+    try:
+        result = supabase.table("predicciones").select("*").order("id", desc=True).limit(50).execute()
+        return {"predicciones": result.data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
