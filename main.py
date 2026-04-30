@@ -1,6 +1,8 @@
 import pickle
 import numpy as np
 import os
+import httpx
+from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -311,3 +313,142 @@ def listar_predicciones():
         return {"predicciones": result.data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+
+#Interfaz Principal del Mapa
+@app.get("/predecir/mapa")
+async def predecir_mapa(semana: int = None, año: int = None):
+    
+    # Si no se especifica semana/año usa la actual
+    if not semana:
+        from datetime import date
+        hoy = date.today()
+        semana = hoy.isocalendar()[1]
+    if not año:
+        año = datetime.now().year
+
+    # Colores por nivel
+    COLORES = {
+        0: "#2196F3",  # Bajo — azul
+        1: "#FF9800",  # Moderado — naranja
+        2: "#F44336",  # Alto — rojo
+        3: "#9C27B0",  # Crítico — morado
+    }
+
+    # Obtener todos los distritos de Supabase
+    try:
+        result = supabase.table("distritos").select("*").execute()
+        distritos = result.data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error obteniendo distritos: {e}")
+
+    predicciones_mapa = []
+
+    for distrito in distritos:
+        try:
+            # Obtener clima en tiempo real desde Open-Meteo
+            lat = distrito["latitud"]
+            lon = distrito["longitud"]
+
+            clima_url = (
+                f"https://api.open-meteo.com/v1/forecast?"
+                f"latitude={lat}&longitude={lon}"
+                f"&current=temperature_2m,relative_humidity_2m,precipitation"
+                f"&timezone=America%2FLima"
+            )
+
+            async with httpx.AsyncClient() as client:
+                clima_resp = await client.get(clima_url, timeout=10)
+                clima_data = clima_resp.json()
+
+            temp    = clima_data["current"]["temperature_2m"]
+            humedad = clima_data["current"]["relative_humidity_2m"]
+            precip  = clima_data["current"]["precipitation"]
+
+            # Obtener promedio histórico de casos para esa semana
+            hist = supabase.table("casos_dengue")\
+                .select("casos_confirmados")\
+                .eq("distrito_id", distrito["id"])\
+                .eq("semana_epidemiologica", semana)\
+                .execute()
+
+            if hist.data:
+                casos_promedio = sum(
+                    r["casos_confirmados"] for r in hist.data
+                ) / len(hist.data)
+            else:
+                casos_promedio = 0.0
+
+            # Construir vector para el modelo
+            semana_rad = 2 * 3.14159 * semana / 52
+            semana_sin = round(float(__import__('math').sin(semana_rad)), 4)
+            semana_cos = round(float(__import__('math').cos(semana_rad)), 4)
+
+            dist_cod = int(le_distrito.transform(
+                [distrito["nombre"]]
+            )[0]) if distrito["nombre"] in le_distrito.classes_ else 0
+
+            prov_cod = int(le_provincia.transform(["LIMA"])[0])
+
+            vector = [
+                dist_cod, prov_cod,
+                semana, semana_sin, semana_cos,
+                temp + 3, temp - 3, temp, 6.0,
+                humedad, precip, precip * 0.5,
+                casos_promedio, casos_promedio * 0.8,
+                casos_promedio * 0.6, casos_promedio * 0.4,
+                precip, precip, precip, precip,
+                temp, temp, temp, temp,
+                humedad, humedad, humedad, humedad,
+                10.0, 50.0, 50.0, 30.0,
+                0.0, 0.0, 0.0, 0.0,
+                casos_promedio * 0.3, casos_promedio * 0.4,
+                casos_promedio * 0.2,
+                casos_promedio / (casos_promedio * 0.8 + 1),
+                casos_promedio * 2.8,
+                temp * humedad / 100,
+                0.0,
+            ]
+
+            import numpy as np
+            X      = np.array(vector).reshape(1, -1)
+            codigo = int(modelo.predict(X)[0])
+            probas = modelo.predict_proba(X)[0]
+            nivel  = CLASES[codigo]
+            confianza = round(float(probas[codigo]) * 100, 2)
+
+            predicciones_mapa.append({
+                "distrito_id":   distrito["id"],
+                "nombre":        distrito["nombre"],
+                "latitud":       lat,
+                "longitud":      lon,
+                "nivel_alerta":  nivel,
+                "nivel_alerta_codigo": codigo,
+                "confianza_pct": confianza,
+                "color":         COLORES[codigo],
+                "clima": {
+                    "temperatura": temp,
+                    "humedad":     humedad,
+                    "precipitacion": precip,
+                },
+                "casos_promedio_historico": round(casos_promedio, 1),
+            })
+
+        except Exception as e:
+            print(f"Error en distrito {distrito['nombre']}: {e}")
+            predicciones_mapa.append({
+                "distrito_id":         distrito["id"],
+                "nombre":              distrito["nombre"],
+                "latitud":             distrito.get("latitud"),
+                "longitud":            distrito.get("longitud"),
+                "nivel_alerta":        "Sin datos",
+                "nivel_alerta_codigo": -1,
+                "color":               "#CCCCCC",
+            })
+
+    return {
+        "semana": semana,
+        "año":    año,
+        "total_distritos": len(predicciones_mapa),
+        "distritos": predicciones_mapa,
+    }
