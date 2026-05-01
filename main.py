@@ -332,29 +332,11 @@ async def predecir_mapa(semana: int = None, año: int = None):
         3: "#9C27B0",
     }
 
-    # Una sola llamada a Open-Meteo con coordenadas del centro de Lima
-    try:
-        async with httpx.AsyncClient() as client:
-            clima_resp = await client.get(
-                "https://api.open-meteo.com/v1/forecast"
-                "?latitude=-12.0464&longitude=-77.0428"
-                "&hourly=temperature_2m,relativehumidity_2m,precipitation"
-                "&timezone=America%2FLima&forecast_days=1",
-                timeout=15
-            )
-            clima_data = clima_resp.json()
-            temp    = clima_data["hourly"]["temperature_2m"][0]
-            humedad = clima_data["hourly"]["relativehumidity_2m"][0]
-            precip  = clima_data["hourly"]["precipitation"][0]
-    except Exception as e:
-        print(f"Error Open-Meteo: {e} — usando valores por defecto")
-        temp    = 19.0
-        humedad = 85.0
-        precip  = 0.0
+    WEATHER_KEY = os.environ.get("WEATHER_API_KEY")
 
     # Obtener distritos
     try:
-        result   = supabase.table("distritos").select("*").execute()
+        result    = supabase.table("distritos").select("*").execute()
         distritos = result.data
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -364,6 +346,26 @@ async def predecir_mapa(semana: int = None, año: int = None):
 
     for distrito in distritos:
         try:
+            lat = distrito["latitud"]
+            lon = distrito["longitud"]
+
+            # Clima individual por distrito desde WeatherAPI
+            try:
+                async with httpx.AsyncClient() as client:
+                    clima_resp = await client.get(
+                        f"https://api.weatherapi.com/v1/current.json"
+                        f"?key={WEATHER_KEY}&q={lat},{lon}&aqi=no",
+                        timeout=10
+                    )
+                    clima_data = clima_resp.json()
+                    temp    = clima_data["current"]["temp_c"]
+                    humedad = clima_data["current"]["humidity"]
+                    precip  = clima_data["current"]["precip_mm"]
+            except Exception:
+                temp    = 19.0
+                humedad = 85.0
+                precip  = 0.0
+
             # Casos históricos promedio
             hist = supabase.table("casos_dengue")\
                 .select("casos_confirmados")\
@@ -416,8 +418,8 @@ async def predecir_mapa(semana: int = None, año: int = None):
             predicciones_mapa.append({
                 "distrito_id":         distrito["id"],
                 "nombre":              distrito["nombre"],
-                "latitud":             distrito["latitud"],
-                "longitud":            distrito["longitud"],
+                "latitud":             lat,
+                "longitud":            lon,
                 "nivel_alerta":        nivel,
                 "nivel_alerta_codigo": codigo,
                 "confianza_pct":       confianza,
@@ -443,9 +445,8 @@ async def predecir_mapa(semana: int = None, año: int = None):
             })
 
     return {
-        "semana":           semana,
-        "año":              año,
-        "total_distritos":  len(predicciones_mapa),
-        "clima_lima":       {"temperatura": temp, "humedad": humedad, "precipitacion": precip},
-        "distritos":        predicciones_mapa,
+        "semana":          semana,
+        "año":             año,
+        "total_distritos": len(predicciones_mapa),
+        "distritos":       predicciones_mapa,
     }
