@@ -409,7 +409,8 @@ async def predecir_mapa(semana: int = None, año: int = None):
                 0.0,
             ]
 
-            X      = np.array(vector).reshape(1, -1)
+            import pandas as pd
+            X = pd.DataFrame([vector], columns=FEATURES)
             codigo = int(modelo.predict(X)[0])
             probas = modelo.predict_proba(X)[0]
             nivel  = CLASES[codigo]
