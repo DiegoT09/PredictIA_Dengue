@@ -353,8 +353,7 @@ async def predecir_mapa(semana: int = None, año: int = None):
             clima_url = (
                 f"https://api.open-meteo.com/v1/forecast?"
                 f"latitude={lat}&longitude={lon}"
-                f"&current_weather=true"
-                f"&hourly=relativehumidity_2m,precipitation"
+                f"&hourly=temperature_2m,relativehumidity_2m,precipitation"
                 f"&timezone=America%2FLima"
                 f"&forecast_days=1"
             )
@@ -363,7 +362,7 @@ async def predecir_mapa(semana: int = None, año: int = None):
                 clima_resp = await client.get(clima_url, timeout=10)
                 clima_data = clima_resp.json()
 
-            temp    = clima_data["current_weather"]["temperature"]
+            temp    = clima_data["hourly"]["temperature_2m"][0]
             humedad = clima_data["hourly"]["relativehumidity_2m"][0]
             precip  = clima_data["hourly"]["precipitation"][0]
 
