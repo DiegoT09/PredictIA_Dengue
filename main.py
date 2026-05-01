@@ -353,17 +353,19 @@ async def predecir_mapa(semana: int = None, año: int = None):
             clima_url = (
                 f"https://api.open-meteo.com/v1/forecast?"
                 f"latitude={lat}&longitude={lon}"
-                f"&current=temperature_2m,relative_humidity_2m,precipitation"
+                f"&current_weather=true"
+                f"&hourly=relativehumidity_2m,precipitation"
                 f"&timezone=America%2FLima"
+                f"&forecast_days=1"
             )
 
             async with httpx.AsyncClient() as client:
                 clima_resp = await client.get(clima_url, timeout=10)
                 clima_data = clima_resp.json()
 
-            temp    = clima_data["current"]["temperature_2m"]
-            humedad = clima_data["current"]["relative_humidity_2m"]
-            precip  = clima_data["current"]["precipitation"]
+            temp    = clima_data["current_weather"]["temperature"]
+            humedad = clima_data["hourly"]["relativehumidity_2m"][0]
+            precip  = clima_data["hourly"]["precipitation"][0]
 
             # Obtener promedio histórico de casos para esa semana
             hist = supabase.table("casos_dengue")\
