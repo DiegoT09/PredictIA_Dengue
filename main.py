@@ -8,6 +8,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client, Client
 
+import csv
+import io
+from fastapi import UploadFile, File
+
 # ── Cargar modelo ──
 with open("random_forest_dengue.pkl", "rb") as f:
     bundle = pickle.load(f)
@@ -450,4 +454,147 @@ async def predecir_mapa(semana: int = None, año: int = None):
         "año":             año,
         "total_distritos": len(predicciones_mapa),
         "distritos":       predicciones_mapa,
+    }
+
+
+
+@app.post("/admin/cargar-casos")
+async def cargar_casos_csv(file: UploadFile = File(...)):
+    """
+    Recibe un CSV del MINSA con columnas:
+    distrito_id, semana_epidemiologica, año, casos_confirmados
+    
+    FastAPI completa automáticamente:
+    - Clima desde WeatherAPI
+    - Lags de casos desde casos_dengue
+    """
+    
+    # Leer el CSV
+    contenido = await file.read()
+    texto     = contenido.decode('utf-8')
+    reader    = csv.DictReader(io.StringIO(texto))
+    
+    exitosos = 0
+    errores  = []
+    WEATHER_KEY = os.environ.get("WEATHER_API_KEY")
+
+    for fila in reader:
+        try:
+            distrito_id = int(fila['distrito_id'])
+            semana      = int(fila['semana_epidemiologica'])
+            año         = int(fila['año'])
+            casos       = int(fila['casos_confirmados'])
+
+            # Obtener coordenadas del distrito desde Supabase
+            dist_result = supabase.table("distritos")\
+                .select("latitud, longitud, nombre")\
+                .eq("id", distrito_id)\
+                .execute()
+
+            if not dist_result.data:
+                errores.append({
+                    "distrito_id": distrito_id,
+                    "error": "Distrito no encontrado"
+                })
+                continue
+
+            lat  = dist_result.data[0]["latitud"]
+            lon  = dist_result.data[0]["longitud"]
+            nombre = dist_result.data[0]["nombre"]
+
+            # Obtener clima desde WeatherAPI
+            try:
+                async with httpx.AsyncClient() as client:
+                    clima_resp = await client.get(
+                        f"https://api.weatherapi.com/v1/current.json"
+                        f"?key={WEATHER_KEY}&q={lat},{lon}&aqi=no",
+                        timeout=10
+                    )
+                    clima_data  = clima_resp.json()
+                    temperatura = clima_data["current"]["temp_c"]
+                    humedad     = clima_data["current"]["humidity"]
+                    precipitacion = clima_data["current"]["precip_mm"]
+            except Exception:
+                temperatura   = 20.0
+                humedad       = 75.0
+                precipitacion = 0.0
+
+            # Calcular lags desde casos_dengue
+            lags = []
+            for lag_sem in range(1, 5):
+                sem_lag = semana - lag_sem
+                año_lag = año
+                if sem_lag <= 0:
+                    sem_lag = 52 + sem_lag
+                    año_lag = año - 1
+
+                lag_result = supabase.table("casos_dengue")\
+                    .select("casos_confirmados")\
+                    .eq("distrito_id", distrito_id)\
+                    .eq("semana_epidemiologica", sem_lag)\
+                    .eq("año", año_lag)\
+                    .execute()
+
+                if lag_result.data:
+                    lags.append(lag_result.data[0]["casos_confirmados"])
+                else:
+                    # Si no hay dato real usa promedio histórico
+                    hist = supabase.table("casos_dengue")\
+                        .select("casos_confirmados")\
+                        .eq("distrito_id", distrito_id)\
+                        .eq("semana_epidemiologica", sem_lag)\
+                        .execute()
+                    if hist.data:
+                        prom = sum(r["casos_confirmados"] for r in hist.data) / len(hist.data)
+                        lags.append(round(prom, 1))
+                    else:
+                        lags.append(0.0)
+
+            # Construir registro completo
+            registro = {
+                "distrito_id":           distrito_id,
+                "semana_epidemiologica": semana,
+                "año":                   año,
+                "casos_confirmados":     casos,
+                "temperatura":           temperatura,
+                "precipitacion":         precipitacion,
+                "humedad":               humedad,
+                "fecha_registro":        f"{año}-01-01T00:00:00",
+            }
+
+            # Verificar si ya existe
+            existente = supabase.table("casos_dengue")\
+                .select("id")\
+                .eq("distrito_id", distrito_id)\
+                .eq("semana_epidemiologica", semana)\
+                .eq("año", año)\
+                .execute()
+
+            if existente.data:
+                supabase.table("casos_dengue")\
+                    .update(registro)\
+                    .eq("id", existente.data[0]["id"])\
+                    .execute()
+                accion = "actualizado"
+            else:
+                supabase.table("casos_dengue")\
+                    .insert(registro)\
+                    .execute()
+                accion = "insertado"
+
+            print(f"✅ {nombre} sem{semana}/{año} — {casos} casos — {accion}")
+            exitosos += 1
+
+        except Exception as e:
+            errores.append({
+                "distrito_id": fila.get("distrito_id"),
+                "semana":      fila.get("semana_epidemiologica"),
+                "error":       str(e)
+            })
+
+    return {
+        "exitosos": exitosos,
+        "errores":  errores,
+        "total":    exitosos + len(errores),
+        "mensaje":  f"✅ {exitosos} registros procesados correctamente"
     }

@@ -6,3 +6,4 @@ numpy
 pydantic
 supabase
 httpx
+python-multipart
