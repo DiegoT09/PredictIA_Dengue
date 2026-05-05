@@ -598,3 +598,15 @@ async def cargar_casos_csv(file: UploadFile = File(...)):
         "total":    exitosos + len(errores),
         "mensaje":  f"✅ {exitosos} registros procesados correctamente"
     }
+
+@app.get("/escenarios")
+def listar_escenarios():
+    try:
+        result = supabase.table("escenarios")\
+            .select("*")\
+            .order("id", desc=True)\
+            .limit(50)\
+            .execute()
+        return {"escenarios": result.data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
