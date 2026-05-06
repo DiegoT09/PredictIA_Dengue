@@ -601,3 +601,50 @@ def listar_escenarios():
         return {"escenarios": result.data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+
+@app.get("/clima/{distrito_id}")
+async def obtener_clima_distrito(distrito_id: int):
+    WEATHER_KEY = os.environ.get("WEATHER_API_KEY")
+    
+    try:
+        # Obtener coordenadas del distrito
+        result = supabase.table("distritos")\
+            .select("latitud, longitud, nombre")\
+            .eq("id", distrito_id)\
+            .execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Distrito no encontrado")
+        
+        lat  = result.data[0]["latitud"]
+        lon  = result.data[0]["longitud"]
+        nombre = result.data[0]["nombre"]
+
+        # Llamada a WeatherAPI
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"https://api.weatherapi.com/v1/current.json"
+                f"?key={WEATHER_KEY}&q={lat},{lon}&aqi=no",
+                timeout=8
+            )
+            clima = resp.json()
+
+        return {
+            "distrito_id": distrito_id,
+            "nombre":      nombre,
+            "temperatura": clima["current"]["temp_c"],
+            "humedad":     clima["current"]["humidity"],
+            "precipitacion": clima["current"]["precip_mm"],
+            "sensacion_termica": clima["current"]["feelslike_c"],
+            "condicion":   clima["current"]["condition"]["text"],
+        }
+
+    except Exception as e:
+        return {
+            "distrito_id":   distrito_id,
+            "temperatura":   19.0,
+            "humedad":       80.0,
+            "precipitacion": 0.0,
+            "error":         str(e)
+        }
