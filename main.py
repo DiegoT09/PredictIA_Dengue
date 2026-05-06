@@ -321,69 +321,63 @@ def listar_predicciones():
 
 #Interfaz Principal del Mapa
 @app.get("/predecir/mapa")
-async def predecir_mapa(semana: int = None, año: int = None):
+async def predecir_mapa(semana: int = None, anio: int = None):
     
     if not semana:
         from datetime import date
         semana = date.today().isocalendar()[1]
-    if not año:
-        año = datetime.now().year
+    if not anio:
+        anio = datetime.now().year
 
     COLORES = {
         0: "#2196F3",
-        1: "#FF9800",
+        1: "#FF9800", 
         2: "#F44336",
         3: "#9C27B0",
     }
 
     WEATHER_KEY = os.environ.get("WEATHER_API_KEY")
 
-    # Obtener distritos
+    # UNA sola llamada de clima para Lima centro
     try:
-        result    = supabase.table("distritos").select("*").execute()
-        distritos = result.data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"https://api.weatherapi.com/v1/current.json"
+                f"?key={WEATHER_KEY}&q=-12.0464,-77.0428&aqi=no",
+                timeout=8
+            )
+            clima_data = resp.json()
+            temp    = clima_data["current"]["temp_c"]
+            humedad = clima_data["current"]["humidity"]
+            precip  = clima_data["current"]["precip_mm"]
+    except:
+        temp, humedad, precip = 19.0, 80.0, 0.0
 
-    predicciones_mapa = []
+    # UNA sola consulta para distritos
+    distritos = supabase.table("distritos").select("*").execute().data
+
+    # UNA sola consulta para casos históricos
+    hist_result = supabase.table("casos_dengue")\
+        .select("distrito_id, casos_confirmados")\
+        .eq("semana_epidemiologica", semana)\
+        .execute()
+
+    casos_por_distrito = {}
+    for r in hist_result.data:
+        did = r["distrito_id"]
+        if did not in casos_por_distrito:
+            casos_por_distrito[did] = []
+        casos_por_distrito[did].append(r["casos_confirmados"])
+
     import math
+    import pandas as pd
+    predicciones_mapa = []
 
     for distrito in distritos:
         try:
-            lat = distrito["latitud"]
-            lon = distrito["longitud"]
+            casos_list = casos_por_distrito.get(distrito["id"], [])
+            casos_promedio = sum(casos_list) / len(casos_list) if casos_list else 0.0
 
-            # Clima individual por distrito desde WeatherAPI
-            try:
-                async with httpx.AsyncClient() as client:
-                    clima_resp = await client.get(
-                        f"https://api.weatherapi.com/v1/current.json"
-                        f"?key={WEATHER_KEY}&q={lat},{lon}&aqi=no",
-                        timeout=10
-                    )
-                    clima_data = clima_resp.json()
-                    temp    = clima_data["current"]["temp_c"]
-                    humedad = clima_data["current"]["humidity"]
-                    precip  = clima_data["current"]["precip_mm"]
-            except Exception:
-                temp    = 19.0
-                humedad = 85.0
-                precip  = 0.0
-
-            # Casos históricos promedio
-            hist = supabase.table("casos_dengue")\
-                .select("casos_confirmados")\
-                .eq("distrito_id", distrito["id"])\
-                .eq("semana_epidemiologica", semana)\
-                .execute()
-
-            casos_promedio = 0.0
-            if hist.data:
-                casos_promedio = sum(
-                    r["casos_confirmados"] for r in hist.data
-                ) / len(hist.data)
-
-            # Construir vector
             semana_rad = 2 * math.pi * semana / 52
             semana_sin = round(math.sin(semana_rad), 4)
             semana_cos = round(math.cos(semana_rad), 4)
@@ -393,38 +387,35 @@ async def predecir_mapa(semana: int = None, año: int = None):
             ) if distrito["nombre"] in le_distrito.classes_ else 0
             prov_cod = int(le_provincia.transform(["LIMA"])[0])
 
-            vector = [
-                dist_cod, prov_cod,
-                semana, semana_sin, semana_cos,
-                temp + 3, temp - 3, temp, 6.0,
-                humedad, precip, precip * 0.5,
-                casos_promedio, casos_promedio * 0.8,
-                casos_promedio * 0.6, casos_promedio * 0.4,
-                precip, precip, precip, precip,
-                temp, temp, temp, temp,
-                humedad, humedad, humedad, humedad,
-                10.0, 50.0, 50.0, 30.0,
-                0.0, 0.0, 0.0, 0.0,
-                casos_promedio * 0.3, casos_promedio * 0.4,
-                casos_promedio * 0.2,
-                casos_promedio / (casos_promedio * 0.8 + 1),
-                casos_promedio * 2.8,
-                temp * humedad / 100,
-                0.0,
-            ]
+            vector = pd.DataFrame([{
+                'Distrito_cod': dist_cod, 'Provincia_cod': prov_cod,
+                'Semana_Epidemiologica': semana, 'Semana_Sin': semana_sin, 'Semana_Cos': semana_cos,
+                'Temp_Max_C': temp + 3, 'Temp_Min_C': temp - 3, 'Temp_Media_C': temp, 'Rango_Termico_C': 6.0,
+                'Humedad_Pct': humedad, 'Precipitacion_Total_mm': precip, 'Precipitacion_Max_Dia_mm': precip * 0.5,
+                'Casos_Lag1_Semanas': casos_promedio, 'Casos_Lag2_Semanas': casos_promedio * 0.8,
+                'Casos_Lag3_Semanas': casos_promedio * 0.6, 'Casos_Lag4_Semanas': casos_promedio * 0.4,
+                'Precip_Lag1_mm': precip, 'Precip_Lag2_mm': precip, 'Precip_Lag3_mm': precip, 'Precip_Lag4_mm': precip,
+                'Temp_Lag1_C': temp, 'Temp_Lag2_C': temp, 'Temp_Lag3_C': temp, 'Temp_Lag4_C': temp,
+                'Humedad_Lag1_Pct': humedad, 'Humedad_Lag2_Pct': humedad, 'Humedad_Lag3_Pct': humedad, 'Humedad_Lag4_Pct': humedad,
+                'Distancia_Estacion_km': 10.0, 'Pct_Masculino': 50.0, 'Pct_Femenino': 50.0, 'Edad_Media': 30.0,
+                'Casos_Menores_1': 0.0, 'Casos_1_4': 0.0, 'Casos_5_11': 0.0, 'Casos_12_17': 0.0,
+                'Casos_18_29': casos_promedio * 0.3, 'Casos_30_59': casos_promedio * 0.4, 'Casos_60_mas': casos_promedio * 0.2,
+                'tasa_crecimiento': casos_promedio / (casos_promedio * 0.8 + 1),
+                'acumulado_4sem': casos_promedio * 2.8,
+                'indice_calor_humedad': temp * humedad / 100,
+                'tendencia_precip': 0.0,
+            }], columns=FEATURES)
 
-            import pandas as pd
-            X = pd.DataFrame([vector], columns=FEATURES)
-            codigo = int(modelo.predict(X)[0])
-            probas = modelo.predict_proba(X)[0]
+            codigo = int(modelo.predict(vector)[0])
+            probas = modelo.predict_proba(vector)[0]
             nivel  = CLASES[codigo]
             confianza = round(float(probas[codigo]) * 100, 2)
 
             predicciones_mapa.append({
                 "distrito_id":         distrito["id"],
                 "nombre":              distrito["nombre"],
-                "latitud":             lat,
-                "longitud":            lon,
+                "latitud":             distrito["latitud"],
+                "longitud":            distrito["longitud"],
                 "nivel_alerta":        nivel,
                 "nivel_alerta_codigo": codigo,
                 "confianza_pct":       confianza,
@@ -432,7 +423,7 @@ async def predecir_mapa(semana: int = None, año: int = None):
                 "clima": {
                     "temperatura": temp,
                     "humedad":     humedad,
-                    "precipitacion": precip,
+                    "precipitacion": precip
                 },
                 "casos_promedio_historico": round(casos_promedio, 1),
             })
@@ -451,11 +442,11 @@ async def predecir_mapa(semana: int = None, año: int = None):
 
     return {
         "semana":          semana,
-        "año":             año,
+        "anio":            anio,
         "total_distritos": len(predicciones_mapa),
+        "clima_lima":      {"temperatura": temp, "humedad": humedad, "precipitacion": precip},
         "distritos":       predicciones_mapa,
     }
-
 
 
 @app.post("/admin/cargar-casos")
