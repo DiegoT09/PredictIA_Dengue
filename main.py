@@ -12,6 +12,7 @@ import csv
 import io
 from fastapi import UploadFile, File
 
+
 # ── Cargar modelo ──
 with open("random_forest_dengue.pkl", "rb") as f:
     bundle = pickle.load(f)
@@ -648,3 +649,63 @@ async def obtener_clima_distrito(distrito_id: int):
             "precipitacion": 0.0,
             "error":         str(e)
         }
+
+@app.get("/estadisticas")
+def obtener_estadisticas():
+    try:
+        # Total casos por distrito
+        casos = supabase.table("casos_dengue")\
+            .select("distrito_id, casos_confirmados, semana_epidemiologica, año")\
+            .execute()
+
+        # Total predicciones
+        preds = supabase.table("predicciones")\
+            .select("nivel_alerta, nivel_alerta_codigo")\
+            .execute()
+
+        # Total alertas
+        alertas = supabase.table("alertas")\
+            .select("id, nivel, estado")\
+            .execute()
+
+        # Casos por semana (evolución temporal)
+        casos_por_semana = {}
+        for c in casos.data:
+            sem = f"Sem {c['semana_epidemiologica']}"
+            if sem not in casos_por_semana:
+                casos_por_semana[sem] = 0
+            casos_por_semana[sem] += c['casos_confirmados']
+
+        # Top 10 distritos
+        casos_por_distrito = {}
+        for c in casos.data:
+            did = c['distrito_id']
+            if did not in casos_por_distrito:
+                casos_por_distrito[did] = 0
+            casos_por_distrito[did] += c['casos_confirmados']
+
+        # Obtener nombres de distritos
+        distritos = supabase.table("distritos").select("id, nombre").execute()
+        nombres = {d['id']: d['nombre'] for d in distritos.data}
+
+        top10 = sorted(casos_por_distrito.items(), key=lambda x: x[1], reverse=True)[:10]
+        top10 = [{"nombre": nombres.get(did, f"Dist {did}"), "casos": casos} for did, casos in top10]
+
+        # Distribución por nivel de alerta
+        niveles = {"Bajo": 0, "Moderado": 0, "Alto": 0, "Crítico": 0}
+        for p in preds.data:
+            nivel = p['nivel_alerta']
+            if nivel in niveles:
+                niveles[nivel] += 1
+
+        return {
+            "total_predicciones": len(preds.data),
+            "total_alertas":      len(alertas.data),
+            "alertas_activas":    len([a for a in alertas.data if a['estado'] == 'activa']),
+            "distribucion_niveles": niveles,
+            "casos_por_semana":   dict(sorted(casos_por_semana.items())),
+            "top10_distritos":    top10,
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
