@@ -651,60 +651,104 @@ async def obtener_clima_distrito(distrito_id: int):
         }
 
 @app.get("/estadisticas")
-def obtener_estadisticas():
+async def obtener_estadisticas():
     try:
-        # Total casos por distrito
-        casos = supabase.table("casos_dengue")\
-            .select("distrito_id, casos_confirmados, semana_epidemiologica, año")\
-            .execute()
+        casos_result     = supabase.table("casos_dengue").select("distrito_id, casos_confirmados, semana_epidemiologica, año").execute()
+        preds_result     = supabase.table("predicciones").select("nivel_alerta, nivel_alerta_codigo").execute()
+        alertas_result   = supabase.table("alertas").select("id, estado").execute()
+        distritos_result = supabase.table("distritos").select("id, nombre").execute()
 
-        # Total predicciones
-        preds = supabase.table("predicciones")\
-            .select("nivel_alerta, nivel_alerta_codigo")\
-            .execute()
+        casos     = casos_result.data
+        preds     = preds_result.data
+        alertas   = alertas_result.data
+        distritos = distritos_result.data
+        nombres   = {d['id']: d['nombre'] for d in distritos}
 
-        # Total alertas
-        alertas = supabase.table("alertas")\
-            .select("id, nivel, estado")\
-            .execute()
-
-        # Casos por semana (evolución temporal)
+        # Casos por semana ordenados
         casos_por_semana = {}
-        for c in casos.data:
+        for c in casos:
             sem = f"Sem {c['semana_epidemiologica']}"
-            if sem not in casos_por_semana:
-                casos_por_semana[sem] = 0
-            casos_por_semana[sem] += c['casos_confirmados']
+            casos_por_semana[sem] = casos_por_semana.get(sem, 0) + c['casos_confirmados']
+        casos_por_semana = dict(sorted(casos_por_semana.items(), key=lambda x: int(x[0].split()[1])))
 
-        # Top 10 distritos
+        # Semanas con datos
+        semanas_unicas = set(c['semana_epidemiologica'] for c in casos)
+
+        # Top 10 distritos con nivel promedio
         casos_por_distrito = {}
-        for c in casos.data:
+        for c in casos:
             did = c['distrito_id']
-            if did not in casos_por_distrito:
-                casos_por_distrito[did] = 0
-            casos_por_distrito[did] += c['casos_confirmados']
+            casos_por_distrito[did] = casos_por_distrito.get(did, 0) + c['casos_confirmados']
 
-        # Obtener nombres de distritos
-        distritos = supabase.table("distritos").select("id, nombre").execute()
-        nombres = {d['id']: d['nombre'] for d in distritos.data}
+        top10_raw = sorted(casos_por_distrito.items(), key=lambda x: x[1], reverse=True)[:10]
+        
+        top10 = []
+        for did, total in top10_raw:
+            # Calcular nivel promedio basado en total de casos
+            if total > 5000:
+                nivel = "Crítico"
+            elif total > 2000:
+                nivel = "Alto"
+            elif total > 500:
+                nivel = "Moderado"
+            else:
+                nivel = "Bajo"
+            
+            top10.append({
+                "nombre": nombres.get(did, f"Dist {did}"),
+                "casos":  total,
+                "nivel":  nivel,
+            })
 
-        top10 = sorted(casos_por_distrito.items(), key=lambda x: x[1], reverse=True)[:10]
-        top10 = [{"nombre": nombres.get(did, f"Dist {did}"), "casos": casos} for did, casos in top10]
-
-        # Distribución por nivel de alerta
+        # Distribución niveles de predicciones
         niveles = {"Bajo": 0, "Moderado": 0, "Alto": 0, "Crítico": 0}
-        for p in preds.data:
+        for p in preds:
             nivel = p['nivel_alerta']
             if nivel in niveles:
                 niveles[nivel] += 1
 
+        # Mapa de calor temporal — top 8 distritos x semanas agrupadas
+        top8_ids = [did for did, _ in top10_raw[:8]]
+        heatmap = {}
+        for c in casos:
+            if c['distrito_id'] not in top8_ids:
+                continue
+            nombre = nombres.get(c['distrito_id'], '')
+            sem    = c['semana_epidemiologica']
+            grupo  = f"W{((sem-1)//4)*4+1}-{((sem-1)//4)*4+4}"
+            key    = f"{nombre}_{grupo}"
+            if key not in heatmap:
+                heatmap[key] = {"nombre": nombre, "grupo": grupo, "casos": 0}
+            heatmap[key]["casos"] += c['casos_confirmados']
+
+        # Convertir heatmap a nivel
+        heatmap_list = []
+        for item in heatmap.values():
+            casos_val = item["casos"]
+            if casos_val > 500:
+                color = "#9C27B0"
+            elif casos_val > 200:
+                color = "#F44336"
+            elif casos_val > 50:
+                color = "#FF9800"
+            else:
+                color = "#2196F3"
+            heatmap_list.append({
+                "nombre": item["nombre"],
+                "grupo":  item["grupo"],
+                "casos":  casos_val,
+                "color":  color,
+            })
+
         return {
-            "total_predicciones": len(preds.data),
-            "total_alertas":      len(alertas.data),
-            "alertas_activas":    len([a for a in alertas.data if a['estado'] == 'activa']),
+            "total_predicciones":   len(preds),
+            "total_alertas":        len(alertas),
+            "alertas_activas":      len([a for a in alertas if a['estado'] == 'activa']),
+            "semanas_con_datos":    len(semanas_unicas),
             "distribucion_niveles": niveles,
-            "casos_por_semana":   dict(sorted(casos_por_semana.items())),
-            "top10_distritos":    top10,
+            "casos_por_semana":     casos_por_semana,
+            "top10_distritos":      top10,
+            "heatmap_temporal":     heatmap_list,
         }
 
     except Exception as e:
