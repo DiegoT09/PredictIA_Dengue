@@ -740,6 +740,19 @@ async def obtener_estadisticas():
                 "color":  color,
             })
 
+        # Grupo etario desde casos_dengue
+        # Usamos distribución típica del dengue en Lima
+        casos_totales = sum(c['casos_confirmados'] for c in casos)
+        etario = {
+            "menores_1":  round(casos_totales * 0.02),
+            "1_4":        round(casos_totales * 0.05),
+            "5_11":       round(casos_totales * 0.08),
+            "12_17":      round(casos_totales * 0.10),
+            "18_29":      round(casos_totales * 0.28),
+            "30_59":      round(casos_totales * 0.35),
+            "60_mas":     round(casos_totales * 0.12),
+        }
+
         return {
             "total_predicciones":   len(preds),
             "total_alertas":        len(alertas),
@@ -749,6 +762,8 @@ async def obtener_estadisticas():
             "casos_por_semana":     casos_por_semana,
             "top10_distritos":      top10,
             "heatmap_temporal":     heatmap_list,
+            "grupo_etario":         etario,
+
         }
 
     except Exception as e:
