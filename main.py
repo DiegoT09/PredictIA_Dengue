@@ -8,6 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client, Client
 
+from typing import Optional
+from uuid import UUID
+
 import csv
 import io
 from fastapi import UploadFile, File
@@ -86,11 +89,11 @@ class InputPrediccion(BaseModel):
     acumulado_4sem: float = 0.0
     indice_calor_humedad: float = 0.0
     tendencia_precip: float = 0.0
-    usuario_id: int = None
+    usuario_id: Optional[str] = None
     distrito_id: int = None
 
 class InputEscenario(BaseModel):
-    usuario_id: int
+    usuario_id: Optional[str] = None
     distrito_id: int
     semana_epidemiologica: int
     año: int
