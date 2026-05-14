@@ -771,3 +771,126 @@ async def obtener_estadisticas():
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+
+@app.get("/alertas/mapa")
+async def alertas_mapa(semana: int = None, anio: int = None):
+    if not semana:
+        from datetime import date
+        semana = date.today().isocalendar()[1]
+    if not anio:
+        anio = datetime.now().year
+
+    WEATHER_KEY = os.environ.get("WEATHER_API_KEY")
+
+    # Una sola llamada de clima para Lima
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"https://api.weatherapi.com/v1/current.json"
+                f"?key={WEATHER_KEY}&q=-12.0464,-77.0428&aqi=no",
+                timeout=8
+            )
+            clima_data = resp.json()
+            temp    = clima_data["current"]["temp_c"]
+            humedad = clima_data["current"]["humidity"]
+            precip  = clima_data["current"]["precip_mm"]
+    except:
+        temp, humedad, precip = 19.0, 80.0, 0.0
+
+    distritos = supabase.table("distritos").select("*").execute().data
+
+    hist_result = supabase.table("casos_dengue")\
+        .select("distrito_id, casos_confirmados")\
+        .eq("semana_epidemiologica", semana)\
+        .execute()
+
+    casos_por_distrito = {}
+    for r in hist_result.data:
+        did = r["distrito_id"]
+        casos_por_distrito[did] = casos_por_distrito.get(did, 0) + r["casos_confirmados"]
+
+    import math
+    import pandas as pd
+
+    alertas = []
+
+    for distrito in distritos:
+        try:
+            casos_promedio = casos_por_distrito.get(distrito["id"], 0.0)
+
+            dist_cod = int(le_distrito.transform(
+                [distrito["nombre"]])[0]
+            ) if distrito["nombre"] in le_distrito.classes_ else 0
+            prov_cod = int(le_provincia.transform(["LIMA"])[0])
+
+            resultados_horizonte = {}
+            for horizonte in [1, 2]:
+                sem_h = semana + horizonte
+                semana_rad = 2 * math.pi * sem_h / 52
+                semana_sin = round(math.sin(semana_rad), 4)
+                semana_cos = round(math.cos(semana_rad), 4)
+
+                vector = pd.DataFrame([{
+                    'Distrito_cod': dist_cod, 'Provincia_cod': prov_cod,
+                    'Semana_Epidemiologica': sem_h,
+                    'Semana_Sin': semana_sin, 'Semana_Cos': semana_cos,
+                    'Temp_Max_C': temp + 3, 'Temp_Min_C': temp - 3,
+                    'Temp_Media_C': temp, 'Rango_Termico_C': 6.0,
+                    'Humedad_Pct': humedad,
+                    'Precipitacion_Total_mm': precip,
+                    'Precipitacion_Max_Dia_mm': precip * 0.5,
+                    'Casos_Lag1_Semanas': casos_promedio,
+                    'Casos_Lag2_Semanas': casos_promedio * 0.8,
+                    'Casos_Lag3_Semanas': casos_promedio * 0.6,
+                    'Casos_Lag4_Semanas': casos_promedio * 0.4,
+                    'Precip_Lag1_mm': precip, 'Precip_Lag2_mm': precip,
+                    'Precip_Lag3_mm': precip, 'Precip_Lag4_mm': precip,
+                    'Temp_Lag1_C': temp, 'Temp_Lag2_C': temp,
+                    'Temp_Lag3_C': temp, 'Temp_Lag4_C': temp,
+                    'Humedad_Lag1_Pct': humedad, 'Humedad_Lag2_Pct': humedad,
+                    'Humedad_Lag3_Pct': humedad, 'Humedad_Lag4_Pct': humedad,
+                    'Distancia_Estacion_km': 10.0,
+                    'Pct_Masculino': 50.0, 'Pct_Femenino': 50.0,
+                    'Edad_Media': 30.0,
+                    'Casos_Menores_1': 0.0, 'Casos_1_4': 0.0,
+                    'Casos_5_11': 0.0, 'Casos_12_17': 0.0,
+                    'Casos_18_29': casos_promedio * 0.3,
+                    'Casos_30_59': casos_promedio * 0.4,
+                    'Casos_60_mas': casos_promedio * 0.2,
+                    'tasa_crecimiento': casos_promedio / (casos_promedio * 0.8 + 1),
+                    'acumulado_4sem': casos_promedio * 2.8,
+                    'indice_calor_humedad': temp * humedad / 100,
+                    'tendencia_precip': 0.0,
+                }], columns=FEATURES)
+
+                codigo = int(modelo.predict(vector)[0])
+                nivel  = CLASES[codigo]
+                resultados_horizonte[horizonte] = {"codigo": codigo, "nivel": nivel}
+
+            # Filtrar solo Crítico y Alto
+            for horizonte, resultado in resultados_horizonte.items():
+                if resultado["codigo"] >= 2:  # Alto o Crítico
+                    alertas.append({
+                        "distrito_id":   distrito["id"],
+                        "nombre":        distrito["nombre"],
+                        "nivel_alerta":  resultado["nivel"],
+                        "nivel_codigo":  resultado["codigo"],
+                        "horizonte":     horizonte,
+                        "semana_alerta": semana + horizonte,
+                        "color": "#F44336" if resultado["codigo"] == 2 else "#9C27B0",
+                    })
+
+        except Exception as e:
+            print(f"Error en distrito {distrito['nombre']}: {e}")
+
+    # Ordenar por nivel descendente
+    alertas.sort(key=lambda x: x["nivel_codigo"], reverse=True)
+
+    return {
+        "semana":          semana,
+        "anio":            anio,
+        "total_alertas":   len(alertas),
+        "clima_lima":      {"temperatura": temp, "humedad": humedad, "precipitacion": precip},
+        "alertas":         alertas,
+    }
