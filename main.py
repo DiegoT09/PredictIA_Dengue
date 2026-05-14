@@ -870,16 +870,21 @@ async def alertas_mapa(semana: int = None, anio: int = None):
 
             # Filtrar solo Crítico y Alto
             for horizonte, resultado in resultados_horizonte.items():
-                if resultado["codigo"] >= 2:  # Alto o Crítico
-                    alertas.append({
+                if resultado["codigo"] >= 2:
+                    probas  = modelo.predict_proba(vector)[0]
+                    codigo  = resultado["codigo"]
+                    confianza = round(float(probas[codigo]) * 100, 2)
+                    if confianza >= 88:  # Alto o Crítico
+                        alertas.append({
                         "distrito_id":   distrito["id"],
                         "nombre":        distrito["nombre"],
                         "nivel_alerta":  resultado["nivel"],
                         "nivel_codigo":  resultado["codigo"],
                         "horizonte":     horizonte,
                         "semana_alerta": semana + horizonte,
+                        "confianza_pct": confianza,
                         "color": "#F44336" if resultado["codigo"] == 2 else "#9C27B0",
-                    })
+                        })
 
         except Exception as e:
             print(f"Error en distrito {distrito['nombre']}: {e}")
