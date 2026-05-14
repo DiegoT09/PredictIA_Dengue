@@ -874,7 +874,7 @@ async def alertas_mapa(semana: int = None, anio: int = None):
                     probas  = modelo.predict_proba(vector)[0]
                     codigo  = resultado["codigo"]
                     confianza = round(float(probas[codigo]) * 100, 2)
-                    if confianza >= 88:  # Alto o Crítico
+                    if confianza >= 75:  # Alto o Crítico
                         alertas.append({
                         "distrito_id":   distrito["id"],
                         "nombre":        distrito["nombre"],
