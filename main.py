@@ -317,7 +317,7 @@ def listar_alertas():
 @app.get("/predicciones")
 def listar_predicciones():
     try:
-        result = supabase.table("predicciones").select("*").order("id", desc=True).limit(50).execute()
+        result = supabase.table("predicciones").select("*, distritos(nombre)").order("created_at", desc=True).limit(100).execute()
         return {"predicciones": result.data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -598,9 +598,9 @@ async def cargar_casos_csv(file: UploadFile = File(...)):
 def listar_escenarios():
     try:
         result = supabase.table("escenarios")\
-            .select("*")\
-            .order("id", desc=True)\
-            .limit(50)\
+            .select("*, distritos(nombre)")\
+            .order("created_at", desc=True)\
+            .limit(100)\
             .execute()
         return {"escenarios": result.data}
     except Exception as e:
