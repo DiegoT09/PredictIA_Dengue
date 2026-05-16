@@ -995,7 +995,7 @@ async def guardar_alertas(semana: int = None, anio: int = None):
                 nivel    = CLASES[codigo]
                 confianza = round(float(probas[codigo]) * 100, 2)
 
-                if codigo >= 2 and confianza >= 75:
+                if codigo >= 2 and confianza >= 50:
                     # Verificar duplicado
                     existe = supabase.table("alertas")\
                         .select("id")\
