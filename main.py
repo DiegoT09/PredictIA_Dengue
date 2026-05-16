@@ -773,7 +773,7 @@ async def obtener_estadisticas():
         raise HTTPException(status_code=500, detail=str(e))
     
 
-@app.get("/alertas/mapa")
+@app.get("/alertas/mapa")  #Eliminar si no se va a usar
 async def alertas_mapa(semana: int = None, anio: int = None):
     if not semana:
         from datetime import date
@@ -901,7 +901,7 @@ async def alertas_mapa(semana: int = None, anio: int = None):
     }
 
 
-@app.post("/alertas/guardar")
+@app.get("/alertas/guardar")
 async def guardar_alertas(semana: int = None, anio: int = None):
     if not semana:
         from datetime import date
