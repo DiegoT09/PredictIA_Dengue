@@ -897,6 +897,7 @@ async def guardar_alertas(semana: int = None, anio: int = None):
                             "anio":            anio,
                             "confianza_pct":   confianza,
                             "estado":          "activa",
+                            "fecha_creacion":  datetime.now().isoformat(),
                         }).execute()
                         alertas_nuevas += 1
                     else:
