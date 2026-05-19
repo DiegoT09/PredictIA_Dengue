@@ -879,7 +879,7 @@ async def guardar_alertas(semana: int = None, anio: int = None):
 
                 print(f"{distrito['nombre']} | H+{horizonte} | {nivel} | {confianza}%")
 
-                if codigo >= 2 and confianza >= 75:
+                if codigo >= 2 and confianza >= 78:
                     existe = supabase.table("alertas")\
                         .select("id")\
                         .eq("nombre_distrito", distrito["nombre"])\
@@ -1036,7 +1036,7 @@ async def actualizar_alertas_background(semana: int, anio: int):
                     nivel     = CLASES[codigo]
                     confianza = round(float(probas[codigo]) * 100, 2)
 
-                    if codigo >= 2 and confianza >= 75:
+                    if codigo >= 2 and confianza >= 78:
                         existe = supabase.table("alertas")\
                             .select("id")\
                             .eq("nombre_distrito", distrito["nombre"])\
