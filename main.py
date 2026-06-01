@@ -758,6 +758,21 @@ async def obtener_estadisticas():
             "60_mas":     round(casos_totales * 0.12),
         }
 
+        # Última actualización de datos
+        ultima_data = supabase.table("casos_dengue")\
+            .select("año, semana_epidemiologica")\
+            .order("año", desc=True)\
+            .order("semana_epidemiologica", desc=True)\
+            .limit(1)\
+            .execute()
+
+        if ultima_data.data:
+            ultimo_anio = ultima_data.data[0]["año"]
+            ultima_semana = ultima_data.data[0]["semana_epidemiologica"]
+        else:
+            ultimo_anio = 0
+            ultima_semana = 0
+
         return {
             "total_predicciones":   len(preds),
             "total_alertas":        len(alertas),
@@ -768,7 +783,10 @@ async def obtener_estadisticas():
             "top10_distritos":      top10,
             "heatmap_temporal":     heatmap_list,
             "grupo_etario":         etario,
-
+            "ultima_actualizacion": {
+                "anio": ultimo_anio,
+                "semana": ultima_semana,
+            },  
         }
 
     except Exception as e:
