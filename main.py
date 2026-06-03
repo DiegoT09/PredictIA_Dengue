@@ -456,144 +456,191 @@ async def predecir_mapa(semana: int = None, anio: int = None):
 
 
 @app.post("/admin/cargar-casos")
-async def cargar_casos_csv(file: UploadFile = File(...)):
-    """
-    Recibe un CSV del MINSA con columnas:
-    distrito_id, semana_epidemiologica, año, casos_confirmados
-    
-    FastAPI completa automáticamente:
-    - Clima desde WeatherAPI
-    - Lags de casos desde casos_dengue
-    """
-    
-    # Leer el CSV
+async def cargar_casos_csv(
+    file: UploadFile = File(...),
+    usuario_id: str = None,
+    nombre_usuario: str = None
+):
+    from datetime import datetime, timedelta
+    import math
+
     contenido = await file.read()
     texto     = contenido.decode('utf-8')
     reader    = csv.DictReader(io.StringIO(texto))
-    
-    exitosos = 0
-    errores  = []
-    WEATHER_KEY = os.environ.get("WEATHER_API_KEY")
+    filas     = list(reader)
 
-    for fila in reader:
+    def semana_a_fechas(semana: int, anio: int):
+        """Convierte semana epidemiológica a fecha inicio y fin"""
+        inicio_anio = datetime(anio, 1, 1)
+        dias_offset = (semana - 1) * 7
+        fecha_inicio = inicio_anio + timedelta(days=dias_offset)
+        fecha_fin    = fecha_inicio + timedelta(days=6)
+        return fecha_inicio.strftime('%Y-%m-%d'), fecha_fin.strftime('%Y-%m-%d')
+
+    # Obtener distritos con coordenadas
+    distritos_result = supabase.table("distritos").select("id, latitud, longitud, nombre").execute()
+    distritos_map    = {d["id"]: d for d in distritos_result.data}
+
+    # Obtener existentes para control de duplicados
+    existentes_result = supabase.table("casos_dengue")\
+        .select("distrito_id, semana_epidemiologica, año").execute()
+    existentes = set(
+        (r["distrito_id"], r["semana_epidemiologica"], r["año"])
+        for r in existentes_result.data
+    )
+
+    # Agrupar filas por distrito
+    filas_por_distrito: dict = {}
+    for fila in filas:
         try:
-            distrito_id = int(fila['distrito_id'])
-            semana      = int(fila['semana_epidemiologica'])
-            año         = int(fila['año'])
-            casos       = int(fila['casos_confirmados'])
+            did = int(fila['distrito_id'])
+            if did not in filas_por_distrito:
+                filas_por_distrito[did] = []
+            filas_por_distrito[did].append(fila)
+        except:
+            continue
 
-            # Obtener coordenadas del distrito desde Supabase
-            dist_result = supabase.table("distritos")\
-                .select("latitud, longitud, nombre")\
-                .eq("id", distrito_id)\
-                .execute()
+    # Para cada distrito obtener clima histórico de Open-Meteo
+    clima_cache: dict = {}  # (distrito_id, semana, año) -> {temp, precip, humedad}
 
-            if not dist_result.data:
-                errores.append({
-                    "distrito_id": distrito_id,
-                    "error": "Distrito no encontrado"
-                })
+    async with httpx.AsyncClient() as client:
+        for did, filas_dist in filas_por_distrito.items():
+            if did not in distritos_map:
                 continue
 
-            lat  = dist_result.data[0]["latitud"]
-            lon  = dist_result.data[0]["longitud"]
-            nombre = dist_result.data[0]["nombre"]
+            dist     = distritos_map[did]
+            lat      = dist["latitud"]
+            lon      = dist["longitud"]
 
-            # Obtener clima desde WeatherAPI
+            # Rango de fechas del CSV para este distrito
+            fechas = []
+            for fila in filas_dist:
+                try:
+                    semana = int(fila['semana_epidemiologica'])
+                    anio   = int(fila.get('año', fila.get('anio', 2025)))
+                    f_ini, f_fin = semana_a_fechas(semana, anio)
+                    fechas.append((f_ini, f_fin, semana, anio))
+                except:
+                    continue
+
+            if not fechas:
+                continue
+
+            # Una sola llamada por distrito con rango completo
+            fecha_min = min(f[0] for f in fechas)
+            fecha_max = max(f[1] for f in fechas)
+
             try:
-                async with httpx.AsyncClient() as client:
-                    clima_resp = await client.get(
-                        f"https://api.weatherapi.com/v1/current.json"
-                        f"?key={WEATHER_KEY}&q={lat},{lon}&aqi=no",
-                        timeout=10
-                    )
-                    clima_data  = clima_resp.json()
-                    temperatura = clima_data["current"]["temp_c"]
-                    humedad     = clima_data["current"]["humidity"]
-                    precipitacion = clima_data["current"]["precip_mm"]
-            except Exception:
-                temperatura   = 20.0
-                humedad       = 75.0
-                precipitacion = 0.0
+                resp = await client.get(
+                    f"https://archive-api.open-meteo.com/v1/archive"
+                    f"?latitude={lat}&longitude={lon}"
+                    f"&start_date={fecha_min}&end_date={fecha_max}"
+                    f"&daily=temperature_2m_mean,precipitation_sum,relative_humidity_2m_mean"
+                    f"&timezone=America/Lima",
+                    timeout=15
+                )
+                clima_data = resp.json()
 
-            # Calcular lags desde casos_dengue
-            lags = []
-            for lag_sem in range(1, 5):
-                sem_lag = semana - lag_sem
-                año_lag = año
-                if sem_lag <= 0:
-                    sem_lag = 52 + sem_lag
-                    año_lag = año - 1
+                # Mapear clima diario a semanas
+                tiempos = clima_data["daily"]["time"]
+                temps   = clima_data["daily"]["temperature_2m_mean"]
+                precips = clima_data["daily"]["precipitation_sum"]
+                humeds  = clima_data["daily"]["relative_humidity_2m_mean"]
 
-                lag_result = supabase.table("casos_dengue")\
-                    .select("casos_confirmados")\
-                    .eq("distrito_id", distrito_id)\
-                    .eq("semana_epidemiologica", sem_lag)\
-                    .eq("año", año_lag)\
-                    .execute()
+                clima_diario = {}
+                for i, t in enumerate(tiempos):
+                    clima_diario[t] = {
+                        "temp":   temps[i]   if temps[i]   is not None else 20.0,
+                        "precip": precips[i] if precips[i] is not None else 0.0,
+                        "humed":  humeds[i]  if humeds[i]  is not None else 75.0,
+                    }
 
-                if lag_result.data:
-                    lags.append(lag_result.data[0]["casos_confirmados"])
-                else:
-                    # Si no hay dato real usa promedio histórico
-                    hist = supabase.table("casos_dengue")\
-                        .select("casos_confirmados")\
-                        .eq("distrito_id", distrito_id)\
-                        .eq("semana_epidemiologica", sem_lag)\
-                        .execute()
-                    if hist.data:
-                        prom = sum(r["casos_confirmados"] for r in hist.data) / len(hist.data)
-                        lags.append(round(prom, 1))
-                    else:
-                        lags.append(0.0)
+                # Promediar clima por semana
+                for f_ini, f_fin, semana, anio in fechas:
+                    dias_semana = []
+                    fecha_actual = datetime.strptime(f_ini, '%Y-%m-%d')
+                    fecha_fin_dt = datetime.strptime(f_fin, '%Y-%m-%d')
+                    while fecha_actual <= fecha_fin_dt:
+                        dia_str = fecha_actual.strftime('%Y-%m-%d')
+                        if dia_str in clima_diario:
+                            dias_semana.append(clima_diario[dia_str])
+                        fecha_actual += timedelta(days=1)
 
-            # Construir registro completo
-            registro = {
-                "distrito_id":           distrito_id,
+                    if dias_semana:
+                        clima_cache[(did, semana, anio)] = {
+                            "temp":   round(sum(d["temp"]   for d in dias_semana) / len(dias_semana), 1),
+                            "precip": round(sum(d["precip"] for d in dias_semana), 2),
+                            "humed":  round(sum(d["humed"]  for d in dias_semana) / len(dias_semana), 1),
+                        }
+
+            except Exception as e:
+                print(f"Error Open-Meteo distrito {did}: {e}")
+
+    # Insertar registros nuevos
+    nuevos     = []
+    duplicados = 0
+    errores    = []
+    anio_carga = None
+
+    for fila in filas:
+        try:
+            did    = int(fila['distrito_id'])
+            semana = int(fila['semana_epidemiologica'])
+            anio   = int(fila.get('año', fila.get('anio', 2025)))
+            casos  = int(fila['casos_confirmados'])
+            anio_carga = anio
+
+            clave = (did, semana, anio)
+            if clave in existentes:
+                duplicados += 1
+                continue
+
+            clima = clima_cache.get(clave, {"temp": 20.0, "precip": 0.0, "humed": 75.0})
+
+            nuevos.append({
+                "distrito_id":           did,
                 "semana_epidemiologica": semana,
-                "año":                   año,
+                "año":                   anio,
                 "casos_confirmados":     casos,
-                "temperatura":           temperatura,
-                "precipitacion":         precipitacion,
-                "humedad":               humedad,
-                "fecha_registro":        f"{año}-01-01T00:00:00",
-            }
-
-            # Verificar si ya existe
-            existente = supabase.table("casos_dengue")\
-                .select("id")\
-                .eq("distrito_id", distrito_id)\
-                .eq("semana_epidemiologica", semana)\
-                .eq("año", año)\
-                .execute()
-
-            if existente.data:
-                supabase.table("casos_dengue")\
-                    .update(registro)\
-                    .eq("id", existente.data[0]["id"])\
-                    .execute()
-                accion = "actualizado"
-            else:
-                supabase.table("casos_dengue")\
-                    .insert(registro)\
-                    .execute()
-                accion = "insertado"
-
-            print(f"✅ {nombre} sem{semana}/{año} — {casos} casos — {accion}")
-            exitosos += 1
+                "temperatura":           clima["temp"],
+                "precipitacion":         clima["precip"],
+                "humedad":               clima["humed"],
+                "fecha_registro":        f"{anio}-01-01T00:00:00",
+            })
+            existentes.add(clave)
 
         except Exception as e:
-            errores.append({
-                "distrito_id": fila.get("distrito_id"),
-                "semana":      fila.get("semana_epidemiologica"),
-                "error":       str(e)
-            })
+            errores.append({"fila": str(fila), "error": str(e)})
+
+    # Insertar en lotes de 50
+    exitosos = 0
+    for i in range(0, len(nuevos), 50):
+        lote = nuevos[i:i+50]
+        try:
+            supabase.table("casos_dengue").insert(lote).execute()
+            exitosos += len(lote)
+        except Exception as e:
+            print(f"Error lote {i}: {e}")
+
+    # Registrar historial
+    try:
+        supabase.table("cargas_datos").insert({
+            "usuario_id":           usuario_id,
+            "nombre_usuario":       nombre_usuario or "Admin",
+            "registros_nuevos":     exitosos,
+            "registros_duplicados": duplicados,
+            "anio":                 anio_carga,
+            "archivo_nombre":       file.filename,
+        }).execute()
+    except Exception as e:
+        print(f"Error historial: {e}")
 
     return {
-        "exitosos": exitosos,
-        "errores":  errores,
-        "total":    exitosos + len(errores),
-        "mensaje":  f"✅ {exitosos} registros procesados correctamente"
+        "exitosos":    exitosos,
+        "duplicados":  duplicados,
+        "errores":     len(errores),
+        "total_filas": len(filas),
+        "mensaje":     f"✅ {exitosos} registros nuevos. {duplicados} duplicados omitidos."
     }
 
 @app.get("/escenarios")
