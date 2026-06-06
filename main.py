@@ -944,7 +944,7 @@ async def guardar_alertas(semana: int = None, anio: int = None):
 
                 print(f"{distrito['nombre']} | H+{horizonte} | {nivel} | {confianza}%")
 
-                if codigo >= 2 and confianza >= 60:
+                if codigo >= 2 and confianza >= 69:
                     existe = supabase.table("alertas")\
                         .select("id")\
                         .eq("nombre_distrito", distrito["nombre"])\
@@ -983,13 +983,17 @@ async def guardar_alertas(semana: int = None, anio: int = None):
 
 
 @app.get("/alertas/listado")
-def listar_alertas(anio: int = None):
+def listar_alertas(anio: int = None, semana: int = None):
     if not anio:
         anio = datetime.now().year
+    if not semana:
+        from datetime import date
+        semana = date.today().isocalendar()[1]
     try:
         result = supabase.table("alertas")\
             .select("*")\
             .eq("anio", anio)\
+            .gte("semana_alerta", semana)\
             .order("nivel_codigo", desc=True)\
             .order("semana_alerta", desc=False)\
             .execute()
