@@ -944,7 +944,7 @@ async def guardar_alertas(semana: int = None, anio: int = None):
 
                 print(f"{distrito['nombre']} | H+{horizonte} | {nivel} | {confianza}%")
 
-                if codigo >= 2 and confianza >= 78:
+                if codigo >= 2 and confianza >= 60:
                     existe = supabase.table("alertas")\
                         .select("id")\
                         .eq("nombre_distrito", distrito["nombre"])\
