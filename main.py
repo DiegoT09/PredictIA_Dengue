@@ -19,7 +19,7 @@ from fastapi import BackgroundTasks
 
 
 # ── Cargar modelo ──
-with open("random_forest_dengue.pkl", "rb") as f:
+with open("random_forest_dengue_v2.pkl", "rb") as f:
     bundle = pickle.load(f)
 
 modelo       = bundle["modelo"]
